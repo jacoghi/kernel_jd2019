@@ -374,6 +374,7 @@ struct qpnp_wled {
 	struct regmap		*regmap;
 	struct pmic_revid_data	*pmic_rev_id;
 	struct work_struct	work;
+	struct delayed_work	hdr_work;
 	struct workqueue_struct *wq;
 	struct mutex		lock;
 	struct mutex		bus_lock;
@@ -425,6 +426,7 @@ struct qpnp_wled {
 	bool			auto_calib_enabled;
 	bool			auto_calib_done;
 	bool			module_dis_perm;
+	bool			hdr_en;
 	ktime_t			start_ovp_fault_time;
 };
 
@@ -1086,6 +1088,69 @@ static ssize_t qpnp_wled_fs_curr_ua_store(struct device *dev,
 	return count;
 }
 
+/* sysfs show function for full scale current in ua*/
+static ssize_t qpnp_wled_hdr_en_show(struct device *dev,
+		struct device_attribute *attr, char *buf)
+{
+	struct qpnp_wled *wled = dev_get_drvdata(dev);
+
+	return snprintf(buf, PAGE_SIZE, "%d\n", wled->hdr_en);
+}
+
+static int qpnp_wled_defautl_curr_ua = 20000; //defualt current
+static int qpnp_wled_hdr_curr_ua = 28000; //hdr mode current
+static ssize_t qpnp_wled_hdr_en_store(struct device *dev,
+		struct device_attribute *attr, const char *buf, size_t count)
+{
+	struct qpnp_wled *wled = dev_get_drvdata(dev);
+	int data, i, rc, hdr_en;
+	u8 reg;
+
+	rc = kstrtoint(buf, 10, &hdr_en);
+	if (rc)
+		return rc;
+
+	pr_info("set hdr = %d\n",hdr_en);
+	if (hdr_en == 0) {
+		wled->hdr_en = false;
+		data = qpnp_wled_defautl_curr_ua;
+		cancel_delayed_work(&wled->hdr_work);
+	} else if (hdr_en == 1) {
+		wled->hdr_en = true;
+		data = qpnp_wled_hdr_curr_ua;
+	} else {
+		pr_info("wrong hdr value\n");
+		return -1;
+	}
+
+	for (i = 0; i < wled->max_strings; i++) {
+		if (data < QPNP_WLED_FS_CURR_MIN_UA)
+			data = QPNP_WLED_FS_CURR_MIN_UA;
+		else if (data > QPNP_WLED_FS_CURR_MAX_UA)
+			data = QPNP_WLED_FS_CURR_MAX_UA;
+
+		reg = data / QPNP_WLED_FS_CURR_STEP_UA;
+		rc = qpnp_wled_masked_write_reg(wled,
+			QPNP_WLED_FS_CURR_REG(wled->sink_base, i),
+			QPNP_WLED_FS_CURR_MASK, reg);
+		if (rc < 0)
+			return rc;
+	}
+
+	wled->fs_curr_ua = data;
+
+	rc = qpnp_wled_sync_reg_toggle(wled);
+	if (rc < 0) {
+		dev_err(&wled->pdev->dev, "Failed to toggle sync reg %d\n", rc);
+		return rc;
+	}
+
+	if (wled->hdr_en == true)
+		schedule_delayed_work(&wled->hdr_work, msecs_to_jiffies(60*1500));
+
+	return count;
+}
+
 /* sysfs attributes exported by wled */
 static struct device_attribute qpnp_wled_attrs[] = {
 	__ATTR(dump_regs, 0664, qpnp_wled_dump_regs_show, NULL),
@@ -1093,12 +1158,54 @@ static struct device_attribute qpnp_wled_attrs[] = {
 		qpnp_wled_dim_mode_store),
 	__ATTR(fs_curr_ua, 0664, qpnp_wled_fs_curr_ua_show,
 		qpnp_wled_fs_curr_ua_store),
+	__ATTR(hdr_en, 0664, qpnp_wled_hdr_en_show,
+		qpnp_wled_hdr_en_store),
 	__ATTR(start_ramp, 0664, NULL, qpnp_wled_ramp_store),
 	__ATTR(ramp_ms, 0664, qpnp_wled_ramp_ms_show, qpnp_wled_ramp_ms_store),
 	__ATTR(ramp_step, 0664, qpnp_wled_ramp_step_show,
 		qpnp_wled_ramp_step_store),
 	__ATTR(secure_mode, 0664, NULL, qpnp_wled_irq_control),
 };
+
+
+static void qpnp_wled_hdr_work(struct work_struct *work)
+{
+	struct qpnp_wled *wled;
+	int data, i, rc;
+	int reg;
+
+	wled = container_of(work, struct qpnp_wled, hdr_work.work);
+	pr_info("%s. wled->hdr_en = %d, wled->fs_curr_ua=%d\n", __func__,
+		wled->hdr_en, wled->fs_curr_ua);
+
+	if (!wled->hdr_en) {
+		pr_info("hdr mode disabled\n");
+		return;
+	}
+
+	pr_info("hdr mode more then 1.5min, disable it.\n");
+	data = qpnp_wled_defautl_curr_ua; //default value
+	for (i = 0; i < wled->max_strings; i++) {
+		if (data < QPNP_WLED_FS_CURR_MIN_UA)
+			data = QPNP_WLED_FS_CURR_MIN_UA;
+		else if (data > QPNP_WLED_FS_CURR_MAX_UA)
+			data = QPNP_WLED_FS_CURR_MAX_UA;
+
+		reg = data / QPNP_WLED_FS_CURR_STEP_UA;
+		rc = qpnp_wled_masked_write_reg(wled,
+			QPNP_WLED_FS_CURR_REG(wled->sink_base, i),
+			QPNP_WLED_FS_CURR_MASK, reg);
+		if (rc < 0)
+			return;
+	}
+
+	wled->fs_curr_ua = data;
+
+	rc = qpnp_wled_sync_reg_toggle(wled);
+	if (rc < 0) {
+		dev_err(&wled->pdev->dev, "Failed to toggle sync reg %d\n", rc);
+	}
+}
 
 /* worker for setting wled brightness */
 static void qpnp_wled_work(struct work_struct *work)
@@ -2675,6 +2782,28 @@ static int qpnp_wled_parse_dt(struct qpnp_wled *wled)
 	return 0;
 }
 
+//[ZUIP-2146][JD19][LCM] add by gongdb for the first usb_chg mode backlight issue begin
+static bool parse_cmdline_is_usbchg_boot(void)
+{
+	extern char *saved_command_line;
+	char search_string[50];
+
+        if (strnstr(saved_command_line, "androidboot.bootreason=",
+                    strlen(saved_command_line))) {
+
+                snprintf(search_string, ARRAY_SIZE(search_string),
+                        "androidboot.bootreason=%s", "usb_chg");
+                if (strnstr(saved_command_line, search_string,
+                    strlen(saved_command_line)))
+                        return true;
+                else
+                        return false;
+        }
+
+        return false;
+}
+//[ZUIP-2146][JD19][LCM] add by gongdb for the first usb_chg mode backlight issue end
+
 static int qpnp_wled_probe(struct platform_device *pdev)
 {
 	struct qpnp_wled *wled;
@@ -2755,6 +2884,9 @@ static int qpnp_wled_probe(struct platform_device *pdev)
 	}
 
 	INIT_WORK(&wled->work, qpnp_wled_work);
+	INIT_DELAYED_WORK(&wled->hdr_work, qpnp_wled_hdr_work);
+	wled->hdr_en = false;
+	qpnp_wled_defautl_curr_ua = wled->fs_curr_ua;
 	wled->ramp_ms = QPNP_WLED_RAMP_DLY_MS;
 	wled->ramp_step = 1;
 
@@ -2762,6 +2894,17 @@ static int qpnp_wled_probe(struct platform_device *pdev)
 	wled->cdev.brightness_get = qpnp_wled_get;
 
 	wled->cdev.max_brightness = WLED_MAX_LEVEL_4095;
+
+	//[ZUIP-2146][JD19][LCM] add by gongdb for the first usb_chg mode backlight issue begin
+	if (parse_cmdline_is_usbchg_boot()) {
+		wled->prev_state = 1;
+		dev_dbg(&pdev->dev, "in qpnp_wled_probe func set prev_state to 1 on usbchg boot\n");
+	}
+	else {
+		dev_dbg(&pdev->dev, "in qpnp_wled_probe func keep prev_state to 0 on not usbchg boot\n");
+	}
+	//[ZUIP-2146][JD19][LCM] add by gongdb for the first usb_chg mode backlight issue end
+
 
 	rc = led_classdev_register(&pdev->dev, &wled->cdev);
 	if (rc) {
