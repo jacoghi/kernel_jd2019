@@ -14,16 +14,16 @@
 #undef FILE_NAME
 #define  FILE_NAME  "cam_sensor_efuse_id.c"
  */
-extern char front_cam_name[64];// s5k3p9
-extern char frontaux_cam_name[64];//  s5k5e9
-extern char back_cam_name[64];//  ov16e10
-extern char backaux_cam_name[64];// ov8856
+char front_cam_name[64] = {0};// s5k3p9
+char frontaux_cam_name[64] = {0};//  s5k5e9
+char back_cam_name[64] = {0};//  ov16e10
+char backaux_cam_name[64] = {0};// ov8856
 
 
-extern char front_cam_efuse_id[17];// s5k3p9
-extern char frontaux_cam_efuse_id[17];// s5k5e9
-extern char back_cam_efuse_id[33];//  ov16e10
-extern char backaux_cam_efuse_id[33];// ov8856
+char front_cam_efuse_id[17] = {0};// s5k3p9
+char frontaux_cam_efuse_id[17] = {0};// s5k5e9
+char back_cam_efuse_id[33] = {0};//  ov16e10
+char backaux_cam_efuse_id[33] = {0};// ov8856
 
 
 static void cam_sensor_UpdateSettings(
